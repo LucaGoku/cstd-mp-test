@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  STUB dialogues.xml - lets the game boot and the online mini-games run.
+  The ORIGINAL game needs its own dialogues.xml for the story mode.
+  If you have it, overwrite this file with the original.
+-->
+<dialogues>
+  <room name="Interface">
+    <char name="Messages">
+      <text id="1">...</text>
+      <text id="2">...</text>
+      <text id="3">...</text>
+      <text id="4">...</text>
+      <text id="5">Drag the stickers into the frame.</text>
+      <text id="6">Don't let them overlap!</text>
+      <text id="7">All stickers placed!</text>
+      <text id="8">Click anywhere to continue.</text>
+    </char>
+  </room>
+</dialogues>
