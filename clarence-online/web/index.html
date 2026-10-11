@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clarence - Online Versus</title>
+<style>
+  :root { color-scheme: dark; --bg:#0e1a24; --card:#16293a; --ink:#e8f1f8; --mute:#93a9b8; --acc:#ffe24a; --ok:#6cff6c; --bad:#ff7a7a; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; display:flex; flex-direction:column; align-items:center; padding:12px; gap:12px; }
+  h1 { margin:4px 0 0; font-size:20px; color:var(--acc); letter-spacing:.5px; }
+  #stage { width:100%; max-width:900px; aspect-ratio:3/2; background:#000; border:2px solid #2b4358; border-radius:8px; overflow:hidden; }
+  #stage > * { width:100%; height:100%; display:block; }
+  #panel { width:100%; max-width:900px; background:var(--card); border-radius:10px; padding:14px; display:grid; gap:10px; }
+  .row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; }
+  button, input { font:inherit; border-radius:8px; border:1px solid #365871; background:#0f2231; color:var(--ink); padding:8px 12px; }
+  button { cursor:pointer; background:#1b6e2f; border-color:#3fb760; font-weight:600; }
+  button.alt { background:#23506f; border-color:#3a7ba5; }
+  button.warn { background:#6e2b1b; border-color:#b75a3f; }
+  button:disabled { opacity:.45; cursor:default; }
+  input#code { width:7em; text-transform:uppercase; letter-spacing:4px; text-align:center; font-weight:700; }
+  #status { font-weight:600; }
+  #status.ok { color:var(--ok); } #status.bad { color:var(--bad); }
+  #big { font-size:34px; letter-spacing:8px; font-weight:800; color:var(--acc); }
+  small, .mute { color:var(--mute); }
+  details { color:var(--mute); } summary { cursor:pointer; }
+  code { background:#0f2231; padding:1px 5px; border-radius:4px; }
+</style>
+</head>
+<body>
+<h1>CLARENCE &mdash; ONLINE VERSUS</h1>
+<div id="stage"></div>
+
+<div id="panel">
+  <div class="row">
+    <button id="create">Create room</button>
+    <span class="mute">or</span>
+    <input id="code" maxlength="4" placeholder="CODE" autocomplete="off" spellcheck="false">
+    <button id="join" class="alt">Join</button>
+    <button id="leave" class="warn" disabled>Leave</button>
+  </div>
+  <div class="row"><span id="status">Not connected</span></div>
+  <div class="row" id="inviteRow" hidden>
+    <span id="big"></span>
+    <button id="copy" class="alt">Copy invite link</button>
+  </div>
+  <small>In the game: on the title screen press <b>ONLINE VERSUS</b> (bottom-left). The host picks the mini-game.</small>
+  <details>
+    <summary>Advanced</summary>
+    <div class="row" style="margin-top:8px">
+      <label>Server <input id="server" size="38" placeholder="(this site)"></label>
+    </div>
+  </details>
+</div>
+
+<script>
+  window.RufflePlayer = window.RufflePlayer || {};
+  window.RufflePlayer.config = {
+    publicPath: "https://unpkg.com/@ruffle-rs/ruffle/",
+    autoplay: "on", unmuteOverlay: "hidden", letterbox: "on",
+    allowScriptAccess: true, contextMenu: "rightClickOnly", splashScreen: false
+  };
+</script>
+<script src="https://unpkg.com/@ruffle-rs/ruffle/ruffle.js"></script>
+<script>
+(function () {
+  "use strict";
+  var SWF = "cstd_mp.swf";
+  var $ = function (id) { return document.getElementById(id); };
+  var params = new URLSearchParams(location.search);
+
+  var player = null, flashReady = false, ws = null, pingTimer = null;
+  var lastFlashStatus = "idle", roomCode = null, wantLeave = false;
+
+  // ------------------------------------------------------------ Flash <-> page bridge
+  function toFlash(kind, data) {
+    try {
+      if (player && flashReady && typeof player.mpRecv === "function") player.mpRecv(kind, data);
+    } catch (e) { console.warn("mpRecv failed", e); }
+  }
+  function setStatus(flashStatus, text, cls) {
+    lastFlashStatus = flashStatus;
+    var s = $("status"); s.textContent = text; s.className = cls || "";
+    toFlash("status", flashStatus);
+  }
+  window.mpFlashReady = function () { flashReady = true; toFlash("status", lastFlashStatus); };
+  window.mpSend = function (payload) {
+    if (ws && ws.readyState === 1) ws.send(JSON.stringify({ t: "m", d: String(payload) }));
+  };
+
+  // ------------------------------------------------------------ networking
+  function serverUrl() {
+    var v = $("server").value.trim() || params.get("server") || "";
+    if (v) {
+      if (!/^wss?:\/\//i.test(v)) v = (location.protocol === "https:" ? "wss://" : "ws://") + v;
+      return v;
+    }
+    return (location.protocol === "https:" ? "wss://" : "ws://") + location.host;
+  }
+  function ui(inRoom) {
+    $("create").disabled = inRoom; $("join").disabled = inRoom; $("code").disabled = inRoom;
+    $("leave").disabled = !inRoom;
+    $("inviteRow").hidden = !roomCode;
+    $("big").textContent = roomCode || "";
+  }
+  function closeWs() {
+    clearInterval(pingTimer); pingTimer = null;
+    if (ws) { ws.onclose = null; ws.onerror = null; try { ws.close(); } catch (e) {} ws = null; }
+  }
+  function connect(onOpen) {
+    closeWs(); wantLeave = false;
+    setStatus("connecting", "Connecting to server (a free host may take ~30s to wake up)...");
+    ui(true);
+    var sock;
+    try { sock = new WebSocket(serverUrl()); } catch (e) { fail("Bad server address"); return; }
+    ws = sock;
+    sock.onopen = function () {
+      pingTimer = setInterval(function () { if (ws && ws.readyState === 1) ws.send('{"t":"ping"}'); }, 20000);
+      onOpen();
+    };
+    sock.onmessage = function (ev) {
+      var m; try { m = JSON.parse(ev.data); } catch (e) { return; }
+      if (m.t === "created") {
+        roomCode = m.code; ui(true);
+        setStatus("waiting|" + m.code, "Room " + m.code + " created - waiting for your friend...", "");
+      } else if (m.t === "paired") {
+        if (m.code) roomCode = m.code;
+        ui(true);
+        setStatus("paired|" + m.role, "Connected! You are the " + (m.role === "host" ? "HOST" : "GUEST") + ". Open ONLINE VERSUS in the game.", "ok");
+      } else if (m.t === "m") {
+        toFlash("msg", m.d);
+      } else if (m.t === "closed") {
+        roomCode = null; ui(false);
+        setStatus("closed|" + (m.why || ""), "Friend left (" + (m.why || "disconnected") + "). Create or join a new room.", "bad");
+      } else if (m.t === "err") {
+        roomCode = null; ui(false); closeWs();
+        setStatus("idle", m.msg || "Error", "bad");
+      }
+    };
+    sock.onclose = function () {
+      if (wantLeave) return;
+      roomCode = null; ui(false); clearInterval(pingTimer);
+      setStatus("closed|server connection lost", "Lost connection to the server. Create or join a room again.", "bad");
+    };
+    sock.onerror = function () { /* onclose follows */ };
+  }
+  function fail(msg) { roomCode = null; ui(false); setStatus("idle", msg, "bad"); }
+
+  $("create").onclick = function () { connect(function () { ws.send('{"t":"create"}'); }); };
+  $("join").onclick = function () {
+    var c = $("code").value.trim().toUpperCase();
+    if (c.length !== 4) { setStatus("idle", "Enter the 4-letter room code first.", "bad"); return; }
+    connect(function () { ws.send(JSON.stringify({ t: "join", code: c })); });
+  };
+  $("code").addEventListener("keydown", function (e) { if (e.key === "Enter") $("join").click(); });
+  $("leave").onclick = function () {
+    wantLeave = true;
+    if (ws && ws.readyState === 1) ws.send('{"t":"leave"}');
+    closeWs(); roomCode = null; ui(false);
+    setStatus("closed|you left", "Left the room.", "");
+  };
+  $("copy").onclick = function () {
+    var url = location.origin + location.pathname + "?room=" + roomCode +
+              (params.get("server") ? "&server=" + encodeURIComponent(params.get("server")) : "");
+    (navigator.clipboard ? navigator.clipboard.writeText(url) : Promise.reject()).then(
+      function () { $("copy").textContent = "Copied!"; setTimeout(function () { $("copy").textContent = "Copy invite link"; }, 1500); },
+      function () { prompt("Copy this invite link:", url); });
+  };
+
+  // ------------------------------------------------------------ boot Ruffle
+  function boot() {
+    if (!window.RufflePlayer || !window.RufflePlayer.newest) {
+      $("stage").innerHTML = "<p style='padding:20px'>Could not load the Ruffle Flash emulator (blocked network?).</p>";
+      return;
+    }
+    var ruffle = window.RufflePlayer.newest();
+    player = ruffle.createPlayer();
+    $("stage").appendChild(player);
+    player.load({ url: SWF, allowScriptAccess: true, autoplay: "on", unmuteOverlay: "hidden", letterbox: "on" });
+    var room = (params.get("room") || "").toUpperCase();
+    if (/^[A-Z]{4}$/.test(room)) { $("code").value = room; setTimeout(function () { $("join").click(); }, 400); }
+  }
+  ui(false);
+  if (document.readyState === "complete") boot(); else window.addEventListener("load", boot);
+})();
+</script>
+</body>
+</html>
