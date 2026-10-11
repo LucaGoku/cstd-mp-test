@@ -36,6 +36,18 @@ package
       public static var oppRot:Number = 0;
       public static var oppProg:int = -1;
       public static var cur:Object = null;
+      public static var diff:int = 1;
+      public static var draw:Boolean = false;
+      public static var myMiss:int = 0;
+      public static var myHit:int = 0;
+      public static var oppMiss:int = 0;
+      public static var oppHit:int = 0;
+
+      /** Rock Battle difficulty: notes per second for Easy / Normal / Hard. Tweak freely. */
+      public static var NPS:Array = [1.5, 2.5, 4.0];
+      public static var DIFF_NAMES:Array = ["EASY", "NORMAL", "HARD"];
+      /** Rock Battle song length in seconds. */
+      public static var DURATION:Number = 40;
 
       private static var _r:MovieClip = null;
       private static var inited:Boolean = false;
@@ -49,6 +61,12 @@ package
       private static var bkSaved:Boolean = false;
       private static var fc:int = 0;
       private static var note:String = "";
+      private static var seedState:Number = 1;
+      private static var myFin:Boolean = false;
+      private static var oppFin:Boolean = false;
+      private static var oppFinM:int = 0;
+      private static var oppFinH:int = 0;
+      private static var diffBtns:Array = [];
 
       private static var btn:Sprite;
       private static var btnTxt:TextField;
@@ -143,6 +161,15 @@ package
          return s;
       }
 
+      private static function paintBtn(sp:Sprite, w:Number, h:Number, fill:uint) : void
+      {
+         sp.graphics.clear();
+         sp.graphics.beginFill(fill);
+         sp.graphics.lineStyle(2, 0xFFFFFF);
+         sp.graphics.drawRoundRect(0, 0, w, h, 10, 10);
+         sp.graphics.endFill();
+      }
+
       private static function buildButton() : void
       {
          btn = makeBtn("ONLINE VERSUS", "open", 6, 368, 120, 26, 12);
@@ -187,6 +214,21 @@ package
             d.text = DESCS[i];
             lobby.addChild(d);
             i++;
+         }
+
+         var dl:TextField = makeText(140, 18, fmt(11, 0xFFE24A, true, "center"));
+         dl.x = 460;
+         dl.y = 128;
+         dl.text = "ROCK DIFFICULTY";
+         lobby.addChild(dl);
+         var di:int = 0;
+         var db:Sprite;
+         while(di < 3)
+         {
+            db = makeBtn(DIFF_NAMES[di] + "  " + NPS[di] + "/s", "d" + di, 470, 150 + di * 34, 120, 26, 12);
+            lobby.addChild(db);
+            diffBtns.push(db);
+            di++;
          }
 
          lobbyHint = makeText(560, 36, fmt(12, 0xFFB347, true, "center"));
@@ -274,6 +316,10 @@ package
          {
             s += "\nOpponent has " + oppProg + "/10 stickers in the frame";
          }
+         if(game == 5)
+         {
+            s += "\nMisses: you " + myMiss + " / opponent " + oppMiss + "   (" + DIFF_NAMES[diff] + ", " + NPS[diff] + " notes/s)";
+         }
          if(note != "")
          {
             s += "\n" + note;
@@ -303,12 +349,22 @@ package
          {
             claim(false);
          }
+         else if(id.charAt(0) == "d")
+         {
+            if(!linked || isHost)
+            {
+               diff = int(id.charAt(1));
+               send("diff|" + diff);
+               refreshLobby();
+            }
+         }
          else if(id.charAt(0) == "g")
          {
             if(linked && isHost)
             {
-               send("go|" + id.charAt(1));
-               startMatch(int(id.charAt(1)));
+               var sd:int = int(Math.random() * 2000000000) + 1;
+               send("go|" + id.charAt(1) + "|" + sd + "|" + diff);
+               startMatch(int(id.charAt(1)), sd, diff);
             }
          }
       }
@@ -335,6 +391,13 @@ package
          }
          lobbyScore.text = "SCORE   YOU " + myWins + " - " + oppWins + " OPPONENT";
          var canPick:Boolean = linked && isHost;
+         var dj:int = 0;
+         while(dj < diffBtns.length)
+         {
+            paintBtn(diffBtns[dj], 120, 26, (dj == diff) ? 0xB38F00 : 0x23506f);
+            diffBtns[dj].alpha = (!linked || isHost) ? 1 : 0.6;
+            dj++;
+         }
          var i:int = 0;
          while(i < gameBtns.length)
          {
@@ -440,12 +503,27 @@ package
          {
             if(inMpContext())
             {
-               startMatch(int(p[1]));
+               startMatch(int(p[1]), Number(p[2]), int(p[3]));
             }
             else
             {
                send("busy");
             }
+         }
+         else if(k == "diff")
+         {
+            if(!isHost)
+            {
+               diff = int(p[1]);
+               refreshLobby();
+            }
+         }
+         else if(k == "rfin")
+         {
+            oppFin = true;
+            oppFinM = int(p[1]);
+            oppFinH = int(p[2]);
+            checkRockFin();
          }
          else if(k == "busy")
          {
@@ -493,17 +571,28 @@ package
          {
             oppRot = Number(p[1]);
             oppY = Number(p[2]);
+            oppMiss = int(p[3]);
+            oppHit = int(p[4]);
          }
       }
 
       // ------------------------------------------------------------ match flow
-      private static function startMatch(g:int) : void
+      private static function startMatch(g:int, sd:Number, d:int) : void
       {
          if(g < 1 || g > 5)
          {
             return;
          }
          game = g;
+         seedState = sd;
+         diff = (d >= 0 && d <= 2) ? d : 1;
+         draw = false;
+         myFin = false;
+         oppFin = false;
+         myMiss = 0;
+         myHit = 0;
+         oppMiss = 0;
+         oppHit = 0;
          active = true;
          resolved = false;
          claimed = false;
@@ -612,6 +701,28 @@ package
 
       private static function finish(w:String) : void
       {
+         if(w == "d")
+         {
+            draw = true;
+            mpFinal = true;
+            note = "";
+            banner.text = "DRAW";
+            banner.textColor = 0xFFE24A;
+            banner.visible = true;
+            readyFn = null;
+            if(cur != null)
+            {
+               try
+               {
+                  cur.mpEnd(false);
+               }
+               catch(err:Error)
+               {
+               }
+            }
+            return;
+         }
+         draw = false;
          var won:Boolean = ((w == "h") == isHost);
          if(won)
          {
@@ -698,17 +809,199 @@ package
          }
       }
 
-      public static function sendRock(rot:Number, y:Number) : void
+      public static function sendRock(rot:Number, y:Number, miss:int, hit:int) : void
       {
          if(!active)
          {
             return;
          }
+         myMiss = miss;
+         myHit = hit;
          fc++;
          if(fc % 2 == 0)
          {
-            send("rock|" + (Math.round(rot * 10) / 10) + "|" + Math.round(y));
+            send("rock|" + (Math.round(rot * 10) / 10) + "|" + Math.round(y) + "|" + miss + "|" + hit);
          }
+      }
+
+      /** Rock Battle: called when my song is over. Fewer misses wins; ties go to more hits. */
+      public static function rockDone(m:int, h:int) : void
+      {
+         if(!active || resolved)
+         {
+            return;
+         }
+         myFin = true;
+         myMiss = m;
+         myHit = h;
+         note = "Song finished - waiting for opponent...";
+         if(isHost)
+         {
+            checkRockFin();
+         }
+         else
+         {
+            send("rfin|" + m + "|" + h);
+         }
+      }
+
+      private static function checkRockFin() : void
+      {
+         if(!isHost || !myFin || !oppFin || resolved)
+         {
+            return;
+         }
+         var w:String;
+         if(myMiss < oppFinM)
+         {
+            w = "h";
+         }
+         else if(myMiss > oppFinM)
+         {
+            w = "g";
+         }
+         else if(myHit > oppFinH)
+         {
+            w = "h";
+         }
+         else if(myHit < oppFinH)
+         {
+            w = "g";
+         }
+         else
+         {
+            w = "d";
+         }
+         decide(w);
+      }
+
+      // ------------------------------------------------------------ random + generators
+      /** Seeded in online matches (both players get the same numbers); Math.random() otherwise. */
+      public static function rnd() : Number
+      {
+         if(!active)
+         {
+            return Math.random();
+         }
+         seedState = (seedState * 1664525 + 1013904223) % 4294967296;
+         return seedState / 4294967296;
+      }
+
+      /** Crypto race course. 1 = free lane, 0 = cube. Rows never contain a 1-lane-wide gap. */
+      public static function cryptoRows() : Array
+      {
+         var rows:Array = [];
+         var total:int = 26;
+         var i:int = 0;
+         var g:int;
+         var gap:int;
+         while(i < total)
+         {
+            rows.push(cryptoRow(i / (total - 1)));
+            gap = (i < 8) ? 2 : 1;
+            g = 0;
+            while(g < gap)
+            {
+               rows.push([1, 1, 1, 1, 1, 1]);
+               g++;
+            }
+            i++;
+         }
+         g = 0;
+         while(g < 6)
+         {
+            rows.push([1, 1, 1, 1, 1, 1]);
+            g++;
+         }
+         return rows;
+      }
+
+      private static function cryptoRow(p:Number) : Array
+      {
+         var k:int = int(1 + p * 3 + rnd() * 1.5);
+         if(k > 4)
+         {
+            k = 4;
+         }
+         var tries:int = 0;
+         var row:Array;
+         var n:int;
+         var c:int;
+         while(tries < 60)
+         {
+            row = [1, 1, 1, 1, 1, 1];
+            n = 0;
+            while(n < k)
+            {
+               c = int(rnd() * 6);
+               if(row[c] == 1)
+               {
+                  row[c] = 0;
+                  n++;
+               }
+            }
+            if(cryptoOk(row))
+            {
+               return row;
+            }
+            tries++;
+         }
+         // fallback: one solid block of cubes, positioned so no gap is 1 lane wide
+         var starts:Array = [];
+         var s:int = 0;
+         var j:int;
+         while(s <= 6 - k)
+         {
+            row = [1, 1, 1, 1, 1, 1];
+            j = 0;
+            while(j < k)
+            {
+               row[s + j] = 0;
+               j++;
+            }
+            if(cryptoOk(row))
+            {
+               starts.push(s);
+            }
+            s++;
+         }
+         var st:int = starts[int(rnd() * starts.length)];
+         row = [1, 1, 1, 1, 1, 1];
+         j = 0;
+         while(j < k)
+         {
+            row[st + j] = 0;
+            j++;
+         }
+         return row;
+      }
+
+      /** True when every run of free lanes is at least 2 wide (the ship needs 2 lanes of room). */
+      private static function cryptoOk(row:Array) : Boolean
+      {
+         var run:int = 0;
+         var i:int = 0;
+         while(i < 6)
+         {
+            if(row[i] == 1)
+            {
+               run++;
+            }
+            else
+            {
+               if(run == 1)
+               {
+                  return false;
+               }
+               run = 0;
+            }
+            i++;
+         }
+         if(run == 1)
+         {
+            return false;
+         }
+         return true;
       }
    }
 }
